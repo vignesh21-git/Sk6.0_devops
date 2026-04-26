@@ -1,0 +1,73 @@
+# ============================================================
+# Sk6.0 — Prometheus Alert Rules
+# ============================================================
+
+groups:
+
+  - name: sk6.api
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "5xx error rate > 1% for 5 minutes"
+          description: "{{ $value | humanizePercentage }} of requests returning 5xx"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "API p95 latency > 2s"
+          description: "p95 latency is {{ $value }}s"
+
+      - alert: APIReplicaDown
+        expr: up{job="sk6-api"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "API replica {{ $labels.instance }} is down"
+
+  - name: sk6.database
+    rules:
+      - alert: PostgresDiskHigh
+        expr: pg_database_size_bytes / (1024^3) > 40
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Postgres DB size > 40 GB"
+
+  - name: sk6.celery
+    rules:
+      - alert: CeleryQueueBacklog
+        expr: celery_queue_length > 1000
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Celery queue backlog > 1000 tasks"
+
+      - alert: SettlementTaskFailed
+        expr: increase(celery_task_failed_total{task="settle_draw_result"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "settle_draw_result task failed — check immediately"
+
+  - name: sk6.business
+    rules:
+      # CRITICAL — must remain zero at all times
+      - alert: WalletBalanceInconsistency
+        expr: wallet_balance_inconsistency_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WALLET INCONSISTENCY DETECTED — immediate action required"
+          description: "wallet_balance_inconsistency counter incremented to {{ $value }}"

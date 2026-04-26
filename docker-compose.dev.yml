@@ -1,0 +1,96 @@
+version: "3.9"
+
+# ============================================================
+# Sk6.0 — Development Override
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# Hot-reload, relaxed limits, no TLS, single API replica.
+# ============================================================
+
+services:
+
+  # Single API with hot-reload (uvicorn --reload)
+  api-1:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.dev
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app
+      --log-level debug
+    volumes:
+      - ./backend:/app
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://sk6:devpassword@pgbouncer:6432/sk6
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-secret-key-not-for-production
+    ports:
+      - "8000:8000"   # Direct API access for testing
+      - "5678:5678"   # debugpy remote debugger
+
+  # Disable replicas 2 and 3 in dev
+  api-2:
+    profiles: ["disabled"]
+  api-3:
+    profiles: ["disabled"]
+
+  # Celery worker with auto-reload
+  celery-worker-1:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.dev
+    command: >
+      watchmedo auto-restart --directory=/app --pattern=*.py --recursive --
+      celery -A app.infrastructure.tasks.celery_app worker
+      --loglevel=debug --concurrency=2 --hostname=dev-worker@%h
+    volumes:
+      - ./backend:/app
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://sk6:devpassword@pgbouncer:6432/sk6
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-secret-key-not-for-production
+
+  celery-worker-2:
+    profiles: ["disabled"]
+
+  # Postgres with port exposed for local DB tools (DBeaver, pgAdmin)
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: devpassword
+    command: >
+      postgres
+      -c max_connections=50
+      -c shared_buffers=256MB
+      -c log_min_duration_statement=100
+      -c log_statement=all
+
+  # Redis with port exposed for redis-cli / RedisInsight
+  redis:
+    command: redis-server --loglevel verbose
+    ports:
+      - "6379:6379"
+
+  # Grafana accessible on localhost:3000 directly
+  grafana:
+    ports:
+      - "3000:3000"
+
+  # Prometheus accessible on localhost:9090
+  prometheus:
+    ports:
+      - "9090:9090"
+
+  # Nginx serves on 8080 (no TLS in dev)
+  nginx:
+    volumes:
+      - ./nginx/conf.d/dev.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"

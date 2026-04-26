@@ -1,0 +1,46 @@
+# ============================================================
+# Sk6.0 — Prometheus Configuration
+# Scrapes metrics from all FastAPI replicas and Redis.
+# ============================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: "sk6"
+    environment: "production"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []   # Add Alertmanager URL if configured
+
+rule_files:
+  - "alerts.yml"
+
+scrape_configs:
+
+  # FastAPI replicas — prometheus-fastapi-instrumentator auto-exposes /metrics
+  - job_name: "sk6-api"
+    static_configs:
+      - targets:
+          - "api-1:8000"
+          - "api-2:8000"
+          - "api-3:8000"
+    metrics_path: /metrics
+    scheme: http
+
+  # Redis — requires redis_exporter sidecar (add to compose if needed)
+  # - job_name: "redis"
+  #   static_configs:
+  #     - targets: ["redis-exporter:9121"]
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # PgBouncer stats (optional — pgbouncer_exporter)
+  # - job_name: "pgbouncer"
+  #   static_configs:
+  #     - targets: ["pgbouncer-exporter:9127"]

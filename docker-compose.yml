@@ -1,0 +1,461 @@
+version: "3.9"
+
+# ============================================================
+# Sk6.0 Lottery Platform — Production Docker Compose
+# All services communicate on the internal 'sk6-net' bridge.
+# Only nginx exposes ports 80/443 to the public internet.
+# ============================================================
+
+x-api-common: &api-common
+  build:
+    context: ./backend
+    dockerfile: docker/Dockerfile
+  image: sk6-api:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://sk6:${DB_PASSWORD}@pgbouncer:6432/sk6
+    REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    SECRET_KEY: ${SECRET_KEY}
+    ENVIRONMENT: production
+  depends_on:
+    pgbouncer:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - sk6-net
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+
+  # ----------------------------------------------------------
+  # NGINX — Edge / Reverse Proxy
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: sk6-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/letsencrypt:ro
+      - static-files:/app/static:ro
+    depends_on:
+      - api-1
+      - api-2
+      - api-3
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # FASTAPI — Application Servers (3 replicas)
+  # ----------------------------------------------------------
+  api-1:
+    <<: *api-common
+    container_name: sk6-api-1
+    command: >
+      gunicorn app.main:app
+      -w 2
+      -k uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:8000
+      --max-requests 1000
+      --max-requests-jitter 100
+      --timeout 30
+      --graceful-timeout 20
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+    volumes:
+      - static-files:/app/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  api-2:
+    <<: *api-common
+    container_name: sk6-api-2
+    command: >
+      gunicorn app.main:app
+      -w 2
+      -k uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:8000
+      --max-requests 1000
+      --max-requests-jitter 100
+      --timeout 30
+      --graceful-timeout 20
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+    volumes:
+      - static-files:/app/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  api-3:
+    <<: *api-common
+    container_name: sk6-api-3
+    command: >
+      gunicorn app.main:app
+      -w 2
+      -k uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:8000
+      --max-requests 1000
+      --max-requests-jitter 100
+      --timeout 30
+      --graceful-timeout 20
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+    volumes:
+      - static-files:/app/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ----------------------------------------------------------
+  # PGBOUNCER — DB Connection Pooler
+  # ----------------------------------------------------------
+  pgbouncer:
+    image: edoburu/pgbouncer:1.21.0
+    container_name: sk6-pgbouncer
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: sk6
+      DB_USER: sk6
+      DB_PASSWORD: ${DB_PASSWORD}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1500
+      DEFAULT_POOL_SIZE: 25
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 5
+      RESERVE_POOL_TIMEOUT: 3
+      MAX_DB_CONNECTIONS: 50
+      SERVER_IDLE_TIMEOUT: 600
+      CLIENT_IDLE_TIMEOUT: 0
+      QUERY_TIMEOUT: 10
+      ADMIN_USERS: pgbouncer_admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432", "-U", "sk6"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # ----------------------------------------------------------
+  # POSTGRESQL 16 — Primary Database
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sk6-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sk6
+      POSTGRES_USER: sk6
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c maintenance_work_mem=512MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=16MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c statement_timeout=5000
+      -c log_min_duration_statement=500
+      -c log_line_prefix='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+      -c log_checkpoints=on
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_lock_waits=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/migrations/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sk6 -d sk6"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+
+  # ----------------------------------------------------------
+  # REDIS 7 — Cache, Session Store, Celery Broker
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: sk6-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --no-appendfsync-on-rewrite yes
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 64mb
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --loglevel notice
+      --slowlog-log-slower-than 10000
+      --slowlog-max-len 128
+    volumes:
+      - redisdata:/data
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # ----------------------------------------------------------
+  # CELERY WORKER — Background Task Processing (2 replicas)
+  # ----------------------------------------------------------
+  celery-worker-1:
+    <<: *api-common
+    container_name: sk6-celery-worker-1
+    command: >
+      celery -A app.infrastructure.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,notifications,settlements
+      --hostname=worker-1@%h
+      --max-tasks-per-child=100
+      --time-limit=300
+      --soft-time-limit=270
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.infrastructure.tasks.celery_app", "inspect", "ping", "-d", "celery@worker-1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  celery-worker-2:
+    <<: *api-common
+    container_name: sk6-celery-worker-2
+    command: >
+      celery -A app.infrastructure.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=default,notifications,settlements
+      --hostname=worker-2@%h
+      --max-tasks-per-child=100
+      --time-limit=300
+      --soft-time-limit=270
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.infrastructure.tasks.celery_app", "inspect", "ping", "-d", "celery@worker-2"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # ----------------------------------------------------------
+  # CELERY BEAT — Task Scheduler (SINGLE instance only)
+  # Running multiple beats causes duplicate task triggers.
+  # ----------------------------------------------------------
+  celery-beat:
+    <<: *api-common
+    container_name: sk6-celery-beat
+    command: >
+      celery -A app.infrastructure.tasks.celery_app beat
+      --loglevel=info
+      --schedule=/tmp/celerybeat-schedule
+      --pidfile=/tmp/celerybeat.pid
+    volumes:
+      - celery-beat-data:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ----------------------------------------------------------
+  # PROMETHEUS — Metrics Collection
+  # ----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: sk6-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+  # ----------------------------------------------------------
+  # GRAFANA — Dashboards & Alerting
+  # ----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: sk6-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+# ----------------------------------------------------------
+# NETWORKS
+# ----------------------------------------------------------
+networks:
+  sk6-net:
+    driver: bridge
+    name: sk6-network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ----------------------------------------------------------
+# VOLUMES
+# ----------------------------------------------------------
+volumes:
+  pgdata:
+    name: sk6-pgdata
+  redisdata:
+    name: sk6-redisdata
+  static-files:
+    name: sk6-static
+  celery-beat-data:
+    name: sk6-celerybeat
+  prometheusdata:
+    name: sk6-prometheus
+  grafanadata:
+    name: sk6-grafana

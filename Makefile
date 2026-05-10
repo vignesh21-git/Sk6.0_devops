@@ -4,7 +4,7 @@
 # Usage: make <target>
 # ============================================================
 
-.PHONY: help dev prod up down logs ps migrate test lint build clean
+.PHONY: help dev prod up down logs ps migrate test lint build clean monitoring rustfs-setup
 
 # ── Help ─────────────────────────────────────────────────────
 help:
@@ -12,9 +12,11 @@ help:
 	@echo "  Sk6.0 Platform — Available Commands"
 	@echo "  ─────────────────────────────────────"
 	@echo "  make dev          Start full dev stack (hot-reload)"
-	@echo "  make prod         Start production stack"
+	@echo "  make prod         Start production stack (incl. monitoring)"
 	@echo "  make up           Alias for prod"
+	@echo "  make monitoring   Start alertmanager + loki + promtail only"
 	@echo "  make down         Stop all containers"
+	@echo "  make rustfs-setup Create RustFS buckets (run once after first deploy)"
 	@echo "  make logs         Tail logs from all containers"
 	@echo "  make logs s=api-1 Tail logs from specific service"
 	@echo "  make ps           Show container status"
@@ -32,22 +34,34 @@ help:
 
 # ── Development ───────────────────────────────────────────────
 dev:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 dev-bg:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 # ── Production ────────────────────────────────────────────────
 prod:
-	docker-compose up -d
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production --profile monitoring up -d
 
 up: prod
 
+monitoring:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile monitoring up -d alertmanager loki promtail
+
 down:
-	docker-compose down
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production --profile monitoring down
 
 restart:
-	docker-compose restart
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production --profile monitoring restart
+
+# ── RustFS bucket setup (run once after first deploy) ─────────
+rustfs-setup:
+	@echo "Setting up RustFS buckets..."
+	mc alias set sk6rustfs http://localhost:9000 $${RUSTFS_ACCESS_KEY} $${RUSTFS_SECRET_KEY}
+	mc mb --ignore-existing sk6rustfs/sk6-static
+	mc mb --ignore-existing sk6rustfs/sk6-backups
+	mc anonymous set download sk6rustfs/sk6-static
+	@echo "RustFS buckets ready."
 
 # ── Logs ──────────────────────────────────────────────────────
 logs:

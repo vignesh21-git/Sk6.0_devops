@@ -1,0 +1,110 @@
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "backend/**"
+      - "docker-compose.yml"
+      - "nginx/**"
+      - "monitoring/**"
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (defaults to commit SHA)"
+        required: false
+
+jobs:
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.sha }}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/docker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/sk6-api:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ github.repository }}/sk6-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate alertmanager config
+        run: |
+          export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          export TELEGRAM_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+          envsubst < monitoring/alertmanager/alertmanager.yml.example \
+            > monitoring/alertmanager/alertmanager.yml
+          # Replace REPLACE_WITH_ placeholders with actual values
+          sed -i "s/REPLACE_WITH_BOT_TOKEN/${TELEGRAM_BOT_TOKEN}/g" monitoring/alertmanager/alertmanager.yml
+          sed -i "s/REPLACE_WITH_CHAT_ID/${TELEGRAM_CHAT_ID}/g" monitoring/alertmanager/alertmanager.yml
+
+      - name: Generate .env
+        run: |
+          cat > .env <<EOF
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          DOMAIN=${{ secrets.DOMAIN }}
+          GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
+          GRAFANA_USER=${{ secrets.GRAFANA_USER || 'admin' }}
+          RUSTFS_ACCESS_KEY=${{ secrets.RUSTFS_ACCESS_KEY }}
+          RUSTFS_SECRET_KEY=${{ secrets.RUSTFS_SECRET_KEY }}
+          RUSTFS_BUCKET=sk6-static
+          RUSTFS_BACKUP_BUCKET=sk6-backups
+          FLOWER_USER=${{ secrets.FLOWER_USER }}
+          FLOWER_PASSWORD=${{ secrets.FLOWER_PASSWORD }}
+          IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }}
+          EOF
+
+      - name: Copy configs to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,nginx/,monitoring/,scripts/,.env"
+          target: /opt/sk6/
+
+      - name: Rolling deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/sk6
+            IMAGE_TAG=${{ needs.build-and-push.outputs.image_tag }} \
+              ./scripts/deploy.sh ${{ needs.build-and-push.outputs.image_tag }}

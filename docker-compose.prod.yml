@@ -1,0 +1,18 @@
+version: "3.9"
+
+# ============================================================
+# Sk6.0 — Production port bindings
+# Applied on top of docker-compose.yml in production.
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ============================================================
+
+services:
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+
+  rustfs:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"

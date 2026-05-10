@@ -1,0 +1,2 @@
+-- Sk6.0 Database Schema
+-- Full DDL will be populated as features are implemented.

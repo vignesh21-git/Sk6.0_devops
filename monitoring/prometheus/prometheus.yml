@@ -1,6 +1,5 @@
 # ============================================================
 # Sk6.0 — Prometheus Configuration
-# Scrapes metrics from all FastAPI replicas and Redis.
 # ============================================================
 
 global:
@@ -13,7 +12,8 @@ global:
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: []   # Add Alertmanager URL if configured
+        - targets: ["alertmanager:9093"]
+      timeout: 10s
 
 rule_files:
   - "alerts.yml"
@@ -30,17 +30,32 @@ scrape_configs:
     metrics_path: /metrics
     scheme: http
 
-  # Redis — requires redis_exporter sidecar (add to compose if needed)
-  # - job_name: "redis"
-  #   static_configs:
-  #     - targets: ["redis-exporter:9121"]
+  # Celery workers — exposes celery_* metrics if flower-exporter is wired
+  # or via prometheus-celery-exporter (add if needed)
+  - job_name: "sk6-flower"
+    static_configs:
+      - targets: ["flower:5555"]
+    metrics_path: /flower/metrics
+
+  # RustFS — S3-compatible object storage metrics
+  - job_name: "sk6-rustfs"
+    static_configs:
+      - targets: ["rustfs:9000"]
+    metrics_path: /minio/v2/metrics/cluster
+    scheme: http
 
   # Prometheus self-monitoring
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
 
-  # PgBouncer stats (optional — pgbouncer_exporter)
-  # - job_name: "pgbouncer"
-  #   static_configs:
-  #     - targets: ["pgbouncer-exporter:9127"]
+  # Alertmanager self-monitoring
+  - job_name: "alertmanager"
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  # Loki self-monitoring
+  - job_name: "loki"
+    static_configs:
+      - targets: ["loki:3100"]
+    metrics_path: /metrics

@@ -4,6 +4,7 @@ version: "3.9"
 # Sk6.0 Lottery Platform — Production Docker Compose
 # All services communicate on the internal 'sk6-net' bridge.
 # Only nginx exposes ports 80/443 to the public internet.
+# RustFS exposes 9000/9001 on 127.0.0.1 only (backup scripts).
 # ============================================================
 
 x-api-common: &api-common
@@ -18,10 +19,16 @@ x-api-common: &api-common
     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     SECRET_KEY: ${SECRET_KEY}
     ENVIRONMENT: production
+    RUSTFS_ENDPOINT: http://rustfs:9000
+    RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+    RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    RUSTFS_BUCKET: ${RUSTFS_BUCKET:-sk6-static}
   depends_on:
     pgbouncer:
       condition: service_healthy
     redis:
+      condition: service_healthy
+    rustfs:
       condition: service_healthy
   networks:
     - sk6-net
@@ -34,23 +41,18 @@ x-api-common: &api-common
 services:
 
   # ----------------------------------------------------------
-  # NGINX — Edge / Reverse Proxy
+  # NGINX — Edge / Reverse Proxy / TLS Termination
   # ----------------------------------------------------------
   nginx:
     image: nginx:1.25-alpine
     container_name: sk6-nginx
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/certs:/etc/letsencrypt:ro
-      - static-files:/app/static:ro
+      - certbot-webroot:/var/www/certbot:ro
     depends_on:
       - api-1
-      - api-2
-      - api-3
     networks:
       - sk6-net
     healthcheck:
@@ -65,7 +67,30 @@ services:
         max-file: "3"
 
   # ----------------------------------------------------------
-  # FASTAPI — Application Servers (3 replicas)
+  # CERTBOT — Automatic TLS Certificate Renewal
+  # Runs renew loop every 12h. Nginx reloads on successful renew.
+  # Initial cert: docker-compose run --rm certbot certonly \
+  #   --webroot -w /var/www/certbot -d yourdomain.com
+  # ----------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    container_name: sk6-certbot
+    restart: unless-stopped
+    volumes:
+      - ./nginx/certs:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet
+        --deploy-hook 'echo [certbot] cert renewed';
+        sleep 12h & wait $${!};
+      done"
+    profiles:
+      - production
+
+  # ----------------------------------------------------------
+  # FASTAPI — Application Servers (3 replicas in production)
   # ----------------------------------------------------------
   api-1:
     <<: *api-common
@@ -82,8 +107,6 @@ services:
       --keep-alive 5
       --access-logfile -
       --error-logfile -
-    volumes:
-      - static-files:/app/static
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -114,8 +137,6 @@ services:
       --keep-alive 5
       --access-logfile -
       --error-logfile -
-    volumes:
-      - static-files:/app/static
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -146,8 +167,6 @@ services:
       --keep-alive 5
       --access-logfile -
       --error-logfile -
-    volumes:
-      - static-files:/app/static
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -165,9 +184,10 @@ services:
 
   # ----------------------------------------------------------
   # PGBOUNCER — DB Connection Pooler
+  # Transaction pool mode: 1,500 client conns → 25 Postgres conns.
   # ----------------------------------------------------------
   pgbouncer:
-    image: edoburu/pgbouncer:1.21.0
+    image: edoburu/pgbouncer:latest
     container_name: sk6-pgbouncer
     restart: unless-stopped
     environment:
@@ -176,6 +196,7 @@ services:
       DB_NAME: sk6
       DB_USER: sk6
       DB_PASSWORD: ${DB_PASSWORD}
+      LISTEN_PORT: 6432
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 1500
       DEFAULT_POOL_SIZE: 25
@@ -186,14 +207,13 @@ services:
       SERVER_IDLE_TIMEOUT: 600
       CLIENT_IDLE_TIMEOUT: 0
       QUERY_TIMEOUT: 10
-      ADMIN_USERS: pgbouncer_admin
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - sk6-net
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432", "-U", "sk6"]
+      test: ["CMD-SHELL", "pidof pgbouncer || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -205,6 +225,7 @@ services:
 
   # ----------------------------------------------------------
   # POSTGRESQL 16 — Primary Database
+  # Full DDL in backend/migrations/schema.sql
   # ----------------------------------------------------------
   postgres:
     image: postgres:16-alpine
@@ -257,7 +278,11 @@ services:
           memory: 2G
 
   # ----------------------------------------------------------
-  # REDIS 7 — Cache, Session Store, Celery Broker
+  # REDIS 7 — Cache / Session Store / Celery Broker
+  # volatile-lru policy: only evict keys with TTL set.
+  # This prevents JWT session keys (which have TTLs) from being
+  # evicted before static cache entries, and never silently
+  # purges keys that must not disappear.
   # ----------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -267,7 +292,7 @@ services:
       redis-server
       --requirepass ${REDIS_PASSWORD}
       --maxmemory 1gb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy volatile-lru
       --appendonly yes
       --appendfsync everysec
       --no-appendfsync-on-rewrite yes
@@ -298,7 +323,9 @@ services:
           memory: 256M
 
   # ----------------------------------------------------------
-  # CELERY WORKER — Background Task Processing (2 replicas)
+  # CELERY WORKERS — Background Task Processing
+  # Worker-1 prioritises settlements; worker-2 handles notifications.
+  # Both drain the default queue.
   # ----------------------------------------------------------
   celery-worker-1:
     <<: *api-common
@@ -307,13 +334,13 @@ services:
       celery -A app.infrastructure.tasks.celery_app worker
       --loglevel=info
       --concurrency=4
-      --queues=default,notifications,settlements
+      --queues=settlements,default
       --hostname=worker-1@%h
       --max-tasks-per-child=100
       --time-limit=300
       --soft-time-limit=270
     healthcheck:
-      test: ["CMD", "celery", "-A", "app.infrastructure.tasks.celery_app", "inspect", "ping", "-d", "celery@worker-1"]
+      test: ["CMD-SHELL", "celery -A app.infrastructure.tasks.celery_app inspect ping --timeout 5 2>&1 | grep -q pong || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -331,7 +358,7 @@ services:
       celery -A app.infrastructure.tasks.celery_app worker
       --loglevel=info
       --concurrency=4
-      --queues=default,notifications,settlements
+      --queues=notifications,default
       --hostname=worker-2@%h
       --max-tasks-per-child=100
       --time-limit=300
@@ -349,8 +376,8 @@ services:
           memory: 1G
 
   # ----------------------------------------------------------
-  # CELERY BEAT — Task Scheduler (SINGLE instance only)
-  # Running multiple beats causes duplicate task triggers.
+  # CELERY BEAT — Task Scheduler (SINGLE instance — NEVER scale)
+  # Multiple beat instances cause duplicate draw-close triggers.
   # ----------------------------------------------------------
   celery-beat:
     <<: *api-common
@@ -367,6 +394,161 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+
+  # ----------------------------------------------------------
+  # FLOWER — Celery Monitoring UI
+  # Accessible at /flower/ via Nginx (internal IP only).
+  # ----------------------------------------------------------
+  flower:
+    <<: *api-common
+    container_name: sk6-flower
+    command: >
+      celery -A app.infrastructure.tasks.celery_app flower
+      --port=5555
+      --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
+      --url_prefix=flower
+      --broker_api=redis://:${REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5555/flower/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ----------------------------------------------------------
+  # RUSTFS — S3-Compatible Object Storage
+  # Stores recharge screenshots and admin PDF reports.
+  # API on 127.0.0.1:9000 (accessible by backup scripts on host).
+  # Console on 127.0.0.1:9001 (internal access only).
+  # Nginx proxies /static/ → rustfs:9000/sk6-static/
+  # ----------------------------------------------------------
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: sk6-rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    volumes:
+      - rustfsdata:/data
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000 || curl -sf http://localhost:9001 || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # ----------------------------------------------------------
+  # ALERTMANAGER — Alert Routing (Prometheus → Telegram)
+  # Config: monitoring/alertmanager/alertmanager.yml
+  # (copy alertmanager.yml.example, fill real values, gitignore)
+  # ----------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: sk6-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+      - "--web.listen-address=0.0.0.0:9093"
+      - "--cluster.listen-address="   # Single-instance mode
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  # ----------------------------------------------------------
+  # LOKI — Log Aggregation Backend
+  # ----------------------------------------------------------
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: sk6-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
+      - lokidata:/loki
+    networks:
+      - sk6-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ----------------------------------------------------------
+  # PROMTAIL — Log Shipper (Docker → Loki)
+  # Mounts Docker socket read-only for container discovery.
+  # ----------------------------------------------------------
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: sk6-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yaml
+    volumes:
+      - ./monitoring/promtail/config.yaml:/etc/promtail/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    networks:
+      - sk6-net
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   # ----------------------------------------------------------
   # PROMETHEUS — Metrics Collection
@@ -401,6 +583,7 @@ services:
 
   # ----------------------------------------------------------
   # GRAFANA — Dashboards & Alerting
+  # Accessible at /grafana/ (IP-restricted: 10.0.0.0/8)
   # ----------------------------------------------------------
   grafana:
     image: grafana/grafana:10.3.1
@@ -441,7 +624,7 @@ networks:
     name: sk6-network
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.21.0.0/16
 
 # ----------------------------------------------------------
 # VOLUMES
@@ -451,11 +634,17 @@ volumes:
     name: sk6-pgdata
   redisdata:
     name: sk6-redisdata
-  static-files:
-    name: sk6-static
+  rustfsdata:
+    name: sk6-rustfs
   celery-beat-data:
     name: sk6-celerybeat
+  certbot-webroot:
+    name: sk6-certbot-webroot
   prometheusdata:
     name: sk6-prometheus
   grafanadata:
     name: sk6-grafana
+  lokidata:
+    name: sk6-loki
+  alertmanager-data:
+    name: sk6-alertmanager

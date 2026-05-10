@@ -4,6 +4,7 @@ version: "3.9"
 # Sk6.0 — Development Override
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
 # Hot-reload, relaxed limits, no TLS, single API replica.
+# Alertmanager / Loki / Promtail not started in dev (too heavy).
 # ============================================================
 
 services:
@@ -26,13 +27,17 @@ services:
       ENVIRONMENT: development
       DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://sk6:devpassword@pgbouncer:6432/sk6
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:devpassword@redis:6379/0
       SECRET_KEY: dev-secret-key-not-for-production
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: devaccess
+      RUSTFS_SECRET_KEY: devsecret123
+      RUSTFS_BUCKET: sk6-static
     ports:
       - "8000:8000"   # Direct API access for testing
       - "5678:5678"   # debugpy remote debugger
 
-  # Disable replicas 2 and 3 in dev
+  # Disable production replicas in dev
   api-2:
     profiles: ["disabled"]
   api-3:
@@ -47,19 +52,57 @@ services:
       watchmedo auto-restart --directory=/app --pattern=*.py --recursive --
       celery -A app.infrastructure.tasks.celery_app worker
       --loglevel=debug --concurrency=2 --hostname=dev-worker@%h
+      --queues=settlements,notifications,default
     volumes:
       - ./backend:/app
     environment:
       ENVIRONMENT: development
       DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://sk6:devpassword@pgbouncer:6432/sk6
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:devpassword@redis:6379/0
       SECRET_KEY: dev-secret-key-not-for-production
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: devaccess
+      RUSTFS_SECRET_KEY: devsecret123
+      RUSTFS_BUCKET: sk6-static
 
   celery-worker-2:
     profiles: ["disabled"]
 
-  # Postgres with port exposed for local DB tools (DBeaver, pgAdmin)
+  # Celery beat — dev env override
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ./backend:/app
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://sk6:devpassword@pgbouncer:6432/sk6
+      REDIS_URL: redis://:devpassword@redis:6379/0
+      SECRET_KEY: dev-secret-key-not-for-production
+
+  # Flower — override command to use dev redis (no password mismatch)
+  flower:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ./backend:/app
+    command: >
+      celery -A app.infrastructure.tasks.celery_app flower
+      --port=5555
+      --basic_auth=admin:admin
+      --url_prefix=flower
+      --broker_api=redis://:devpassword@redis:6379/0
+    environment:
+      REDIS_URL: redis://:devpassword@redis:6379/0
+      FLOWER_USER: admin
+      FLOWER_PASSWORD: admin
+    ports:
+      - "5555:5555"   # Direct Flower UI access
+
+  # Postgres — expose port for DBeaver / pgAdmin
   postgres:
     ports:
       - "5432:5432"
@@ -72,25 +115,48 @@ services:
       -c log_min_duration_statement=100
       -c log_statement=all
 
-  # Redis with port exposed for redis-cli / RedisInsight
+  # Redis — password kept so all services use consistent auth
   redis:
-    command: redis-server --loglevel verbose
+    command: >
+      redis-server
+      --requirepass devpassword
+      --loglevel verbose
+      --maxmemory-policy volatile-lru
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
-  # Grafana accessible on localhost:3000 directly
+  # RustFS — expose ports for direct access in dev
+  rustfs:
+    environment:
+      RUSTFS_ACCESS_KEY: devaccess
+      RUSTFS_SECRET_KEY: devsecret123
+    ports:
+      - "127.0.0.1:9100:9000"   # S3 API
+      - "127.0.0.1:9101:9001"   # Web console
+
+  # Grafana — direct access in dev
   grafana:
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SERVER_ROOT_URL: "http://localhost:3000"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
 
-  # Prometheus accessible on localhost:9090
+  # Prometheus — direct access in dev
   prometheus:
     ports:
       - "9090:9090"
+    depends_on: []   # No alertmanager dependency in dev
 
-  # Nginx serves on 8080 (no TLS in dev)
+  # Nginx — no TLS; shadow sk6.conf with dev config to avoid cert/domain errors
   nginx:
     volumes:
-      - ./nginx/conf.d/dev.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/dev.conf:/etc/nginx/conf.d/sk6.conf:ro
     ports:
       - "8080:80"

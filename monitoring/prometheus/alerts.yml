@@ -4,6 +4,7 @@
 
 groups:
 
+  # ── API / Application ─────────────────────────────────────
   - name: sk6.api
     rules:
       - alert: HighErrorRate
@@ -13,7 +14,7 @@ groups:
           severity: page
         annotations:
           summary: "5xx error rate > 1% for 5 minutes"
-          description: "{{ $value | humanizePercentage }} of requests returning 5xx"
+          description: "{{ $value | humanizePercentage }} of requests returning 5xx on {{ $labels.instance }}"
 
       - alert: HighLatency
         expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
@@ -22,7 +23,7 @@ groups:
           severity: page
         annotations:
           summary: "API p95 latency > 2s"
-          description: "p95 latency is {{ $value }}s"
+          description: "p95 latency is {{ $value | humanizeDuration }} on {{ $labels.instance }}"
 
       - alert: APIReplicaDown
         expr: up{job="sk6-api"} == 0
@@ -32,6 +33,16 @@ groups:
         annotations:
           summary: "API replica {{ $labels.instance }} is down"
 
+      - alert: APIHighRequestRate
+        expr: rate(http_requests_total[1m]) > 400
+        for: 3m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Request rate > 400 req/s — approaching capacity"
+          description: "Current rate: {{ $value | humanize }} req/s on {{ $labels.instance }}"
+
+  # ── Database ──────────────────────────────────────────────
   - name: sk6.database
     rules:
       - alert: PostgresDiskHigh
@@ -40,17 +51,79 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Postgres DB size > 40 GB"
+          summary: "Postgres DB size > 40 GB — plan capacity upgrade"
 
-  - name: sk6.celery
+      - alert: PgBouncerPoolWaiting
+        expr: pgbouncer_pools_cl_waiting > 50
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "PgBouncer: {{ $value }} clients waiting — pool exhausted"
+          description: "Connection pool is saturated. All 25 Postgres connections in use."
+
+      - alert: PgBouncerDown
+        expr: up{job="sk6-pgbouncer"} == 0
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "PgBouncer is down — database unreachable"
+
+  # ── Redis ─────────────────────────────────────────────────
+  - name: sk6.redis
     rules:
-      - alert: CeleryQueueBacklog
-        expr: celery_queue_length > 1000
+      - alert: RedisDown
+        expr: up{job="sk6-redis"} == 0
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "Redis is down — sessions and Celery broker unavailable"
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
         for: 5m
         labels:
           severity: warn
         annotations:
-          summary: "Celery queue backlog > 1000 tasks"
+          summary: "Redis memory at {{ $value | humanizePercentage }} — risk of volatile-lru eviction"
+          description: "JWT session keys may start being evicted. Consider increasing maxmemory."
+
+      - alert: RedisEvictionRate
+        expr: rate(redis_evicted_keys_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Redis is evicting {{ $value | humanize }} keys/s — session stability at risk"
+
+  # ── Celery / Background Jobs ──────────────────────────────
+  - name: sk6.celery
+    rules:
+      - alert: CeleryWorkerDown
+        expr: up{job="sk6-flower"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Celery Flower is down — worker health unknown"
+
+      - alert: CeleryQueueBacklog
+        expr: celery_queue_length{queue="settlements"} > 20
+        for: 3m
+        labels:
+          severity: page
+        annotations:
+          summary: "Settlements queue backlog: {{ $value }} tasks — draw results delayed"
+
+      - alert: CeleryQueueNotifications
+        expr: celery_queue_length{queue="notifications"} > 500
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Notifications queue backlog: {{ $value }} tasks"
 
       - alert: SettlementTaskFailed
         expr: increase(celery_task_failed_total{task="settle_draw_result"}[10m]) > 0
@@ -58,8 +131,18 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "settle_draw_result task failed — check immediately"
+          summary: "settle_draw_result task FAILED — winners not credited"
+          description: "Immediate action required. Check Flower and Celery worker logs."
 
+      - alert: DrawCloseTaskMissed
+        expr: increase(celery_task_failed_total{task="close_draw"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "close_draw task failed — betting may still be open after draw time"
+
+  # ── Business / Wallet ─────────────────────────────────────
   - name: sk6.business
     rules:
       # CRITICAL — must remain zero at all times
@@ -70,4 +153,49 @@ groups:
           severity: critical
         annotations:
           summary: "WALLET INCONSISTENCY DETECTED — immediate action required"
-          description: "wallet_balance_inconsistency counter incremented to {{ $value }}"
+          description: "Counter at {{ $value }}. DB audit trail must be reviewed immediately."
+
+      - alert: RechargeApprovalBacklog
+        expr: pending_recharge_requests_total > 100
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $value }} recharge requests pending admin approval"
+
+  # ── Infrastructure / Host ─────────────────────────────────
+  - name: sk6.infra
+    rules:
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Disk space at {{ $value | humanizePercentage }} free — action needed"
+
+      - alert: DiskSpaceCritical
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.05
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Disk space critically low — services at risk of failure"
+
+      - alert: RustFSDown
+        expr: up{job="sk6-rustfs"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "RustFS object storage is down — file uploads will fail"
+
+      - alert: HostHighCPU
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Host CPU at {{ $value | humanize }}% — consider scaling"

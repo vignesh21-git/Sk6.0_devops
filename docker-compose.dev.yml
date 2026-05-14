@@ -5,6 +5,12 @@ version: "3.9"
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
 # Hot-reload, relaxed limits, no TLS, single API replica.
 # Alertmanager / Loki / Promtail not started in dev (too heavy).
+#
+# Host port block: 16XXX (Sk6.0-reserved), all bound to 127.0.0.1
+# so other projects on the same machine (RxBB/Frappe bench, rxbb-kb,
+# Mosaic, system Redis) keep their default ports unaffected.
+# Access from a laptop via SSH tunnel, e.g.:
+#   ssh -L 16080:127.0.0.1:16080 -L 16300:127.0.0.1:16300 <host>
 # ============================================================
 
 services:
@@ -34,8 +40,8 @@ services:
       RUSTFS_SECRET_KEY: devsecret123
       RUSTFS_BUCKET: sk6-static
     ports:
-      - "8000:8000"   # Direct API access for testing
-      - "5678:5678"   # debugpy remote debugger
+      - "127.0.0.1:16800:8000"   # Direct API access for testing
+      - "127.0.0.1:16678:5678"   # debugpy remote debugger
 
   # Disable production replicas in dev
   api-2:
@@ -100,12 +106,18 @@ services:
       FLOWER_USER: admin
       FLOWER_PASSWORD: admin
     ports:
-      - "5555:5555"   # Direct Flower UI access
+      - "127.0.0.1:16555:5555"   # Direct Flower UI access
+
+  # PgBouncer — dev: plain-text password storage so it can SCRAM with Postgres 16
+  pgbouncer:
+    environment:
+      DB_PASSWORD: devpassword
+      AUTH_TYPE: plain
 
   # Postgres — expose port for DBeaver / pgAdmin
   postgres:
     ports:
-      - "5432:5432"
+      - "127.0.0.1:16432:5432"
     environment:
       POSTGRES_PASSWORD: devpassword
     command: >
@@ -123,7 +135,7 @@ services:
       --loglevel verbose
       --maxmemory-policy volatile-lru
     ports:
-      - "6379:6379"
+      - "127.0.0.1:16379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "devpassword", "ping"]
       interval: 10s
@@ -136,22 +148,22 @@ services:
       RUSTFS_ACCESS_KEY: devaccess
       RUSTFS_SECRET_KEY: devsecret123
     ports:
-      - "127.0.0.1:9100:9000"   # S3 API
-      - "127.0.0.1:9101:9001"   # Web console
+      - "127.0.0.1:16100:9000"   # S3 API
+      - "127.0.0.1:16101:9001"   # Web console
 
   # Grafana — direct access in dev
   grafana:
     ports:
-      - "3000:3000"
+      - "127.0.0.1:16300:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_SERVER_ROOT_URL: "http://localhost:3000"
+      GF_SERVER_ROOT_URL: "http://localhost:16300"
       GF_SERVER_SERVE_FROM_SUB_PATH: "false"
 
   # Prometheus — direct access in dev
   prometheus:
     ports:
-      - "9090:9090"
+      - "127.0.0.1:16090:9090"
     depends_on: []   # No alertmanager dependency in dev
 
   # Nginx — no TLS; shadow sk6.conf with dev config to avoid cert/domain errors
@@ -159,4 +171,4 @@ services:
     volumes:
       - ./nginx/dev.conf:/etc/nginx/conf.d/sk6.conf:ro
     ports:
-      - "8080:80"
+      - "127.0.0.1:16080:80"

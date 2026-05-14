@@ -49,10 +49,10 @@ monitoring:
 	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile monitoring up -d alertmanager loki promtail
 
 down:
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production --profile monitoring down
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.prod.yml --profile production --profile monitoring --profile disabled down --remove-orphans
 
 restart:
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile production --profile monitoring restart
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.prod.yml --profile production --profile monitoring restart
 
 # ── RustFS bucket setup (run once after first deploy) ─────────
 rustfs-setup:
@@ -65,37 +65,37 @@ rustfs-setup:
 
 # ── Logs ──────────────────────────────────────────────────────
 logs:
-	docker-compose logs -f $(s)
+	docker compose logs -f $(s)
 
 # ── Status ────────────────────────────────────────────────────
 ps:
-	docker-compose ps
+	docker compose ps
 
 # ── Build ─────────────────────────────────────────────────────
 build:
-	docker-compose build --no-cache api-1
+	docker compose build --no-cache api-1
 
 # ── Database Migrations ───────────────────────────────────────
 migrate:
-	docker-compose exec api-1 alembic upgrade head
+	docker compose exec api-1 alembic upgrade head
 
 migrate-new:
 	@read -p "Migration message: " msg; \
-	docker-compose exec api-1 alembic revision --autogenerate -m "$$msg"
+	docker compose exec api-1 alembic revision --autogenerate -m "$$msg"
 
 migrate-down:
-	docker-compose exec api-1 alembic downgrade -1
+	docker compose exec api-1 alembic downgrade -1
 
 migrate-history:
-	docker-compose exec api-1 alembic history --verbose
+	docker compose exec api-1 alembic history --verbose
 
 # ── Testing ───────────────────────────────────────────────────
 test:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 		exec api-1 pytest tests/unit tests/integration -v --cov=app --cov-report=term
 
 test-unit:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 		exec api-1 pytest tests/unit -v
 
 test-load:
@@ -103,35 +103,35 @@ test-load:
 
 # ── Linting ───────────────────────────────────────────────────
 lint:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 		exec api-1 sh -c "ruff check app/ && mypy app/"
 
 security-scan:
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 		exec api-1 sh -c "bandit -r app/ && safety check -r requirements.txt"
 
 # ── Shell Access ──────────────────────────────────────────────
 shell:
-	docker-compose exec api-1 bash
+	docker compose exec api-1 bash
 
 dbshell:
-	docker-compose exec postgres psql -U sk6 -d sk6
+	docker compose exec postgres psql -U sk6 -d sk6
 
 redis-cli:
-	docker-compose exec redis redis-cli -a $${REDIS_PASSWORD}
+	docker compose exec redis redis-cli -a $${REDIS_PASSWORD}
 
 # ── Celery ────────────────────────────────────────────────────
 worker-stats:
-	docker-compose exec celery-worker-1 celery -A app.infrastructure.tasks.celery_app inspect stats
+	docker compose exec celery-worker-1 celery -A app.infrastructure.tasks.celery_app inspect stats
 
 worker-active:
-	docker-compose exec celery-worker-1 celery -A app.infrastructure.tasks.celery_app inspect active
+	docker compose exec celery-worker-1 celery -A app.infrastructure.tasks.celery_app inspect active
 
 # ── Cleanup ───────────────────────────────────────────────────
 clean:
-	docker-compose down --remove-orphans
+	docker compose down --remove-orphans
 	docker system prune -f
 
 clean-volumes:
-	docker-compose down -v
+	docker compose down -v
 	@echo "WARNING: All data volumes deleted."

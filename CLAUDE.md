@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Read me first
+
+Living state of the project lives in **[docs/](docs/)** — start there:
+- [docs/STATUS.md](docs/STATUS.md) — what's actually built right now (authoritative)
+- [docs/GAPS.md](docs/GAPS.md) — known gaps + workarounds
+- [docs/BUGS.md](docs/BUGS.md) — bugs hit and how they were fixed
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phase plan and sprint schedule
+
+The rest of *this* file describes the **target design** (Clean Architecture, full schema, routes, etc.). Some of it is built, some isn't — when CLAUDE.md and STATUS.md disagree, STATUS.md wins.
+
 ## Project Overview
 
 Sk6.0 is a lottery platform (Web + Android + iOS) built with FastAPI (Python 3.12), PostgreSQL 16, Redis 7, and Celery on the backend, and Flutter for mobile. The entire backend stack runs in Docker Compose. Nginx load-balances across 3 API replicas in production; dev uses a single hot-reloading replica.

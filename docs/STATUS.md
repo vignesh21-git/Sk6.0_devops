@@ -59,8 +59,8 @@ Verified end-to-end on 2026-05-14. **11/11 unit tests passing.**
   - `request_otp.py` — re-issues OTP for an existing phone.
   - `verify_otp.py` — verifies OTP, marks `phone_verified`, locks out after 5 failed attempts.
   - `login.py` — validates password + phone_verified + status, issues JWT, stores `jti` in Redis.
-  - `logout.py` — revokes `jti` from Redis.
-  - `_otp.py` — helper for generating numeric OTP codes.
+  - `_otp.py` — helper for generating numeric OTP codes (shared by `register` and `request_otp`).
+- Logout has no business rule, so it lives **inline** in [api/v1/auth.py](../backend/app/api/v1/auth.py) — `await sessions.revoke(jti)`. Per [ARCHITECTURE.md](ARCHITECTURE.md), use cases are added only when a business rule exists.
 
 ### Infrastructure
 - `db/models/base.py` — SQLAlchemy `DeclarativeBase`.

@@ -10,7 +10,6 @@ from app.api.v1.deps import (
     UserRepoDep,
 )
 from app.application.use_cases.auth.login import LoginInput, LoginUseCase
-from app.application.use_cases.auth.logout import LogoutInput, LogoutUseCase
 from app.application.use_cases.auth.register import (
     RegisterUserInput,
     RegisterUserUseCase,
@@ -118,6 +117,8 @@ async def logout(
     current: CurrentSession,
     sessions: SessionStoreDep,
 ) -> LogoutResponse:
+    # No business rule — revoking the jti is the entire operation.
+    # If logout ever grows logic (audit log, cart clear, etc.) promote to a use case.
     _payload, jti = current
-    await LogoutUseCase(sessions=sessions).execute(LogoutInput(jti=jti))
+    await sessions.revoke(jti)
     return LogoutResponse()

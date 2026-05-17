@@ -9,6 +9,7 @@ Up-to-date state of the project. These four files are the **first place** to loo
 | [BUGS.md](BUGS.md) | Bugs encountered, root cause, fix. Open at top, resolved at bottom. |
 | [ROADMAP.md](ROADMAP.md) | Sprint plan + per-phase deliverables. Re-planned 2026-05-14 (Sprint 2 descope). |
 | [PORTS.md](PORTS.md) | Dev `127.0.0.1:16XXX` port map with restore instructions. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Clean-Architecture reference for Python projects (template — applies here and reusable elsewhere). |
 
 ## Conventions
 
